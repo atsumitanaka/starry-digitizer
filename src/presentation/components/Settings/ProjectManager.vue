@@ -78,20 +78,31 @@ export default defineComponent({
       const data = event.data
       if (!data || data.type !== 'load-project') return
 
-      let blob: Blob | null = null
-      if (data.zip instanceof Blob) {
-        blob = data.zip
+      // projectService.loadProject() reads `file.name.endsWith('.zip')`,
+      // so we MUST hand it a File (not a bare Blob) or that check throws.
+      let file: File | null = null
+      const defaultName =
+        (typeof data.filename === 'string' && data.filename) ||
+        'project.zip'
+      if (data.zip instanceof File) {
+        file = data.zip
+      } else if (data.zip instanceof Blob) {
+        file = new File([data.zip], defaultName, {
+          type: 'application/zip',
+        })
       } else if (typeof data.zipBase64 === 'string') {
         try {
           const bin = atob(data.zipBase64)
           const bytes = new Uint8Array(bin.length)
           for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-          blob = new Blob([bytes], { type: 'application/zip' })
+          file = new File([bytes], defaultName, {
+            type: 'application/zip',
+          })
         } catch (e) {
           console.error('base64 decode failed', e)
         }
       }
-      if (blob) await this.loadProjectFromBlob(blob)
+      if (file) await this.loadProjectFromBlob(file)
     }
     window.addEventListener('message', this.messageHandler)
     // Announce readiness so the parent knows when it's safe to send the ZIP.
