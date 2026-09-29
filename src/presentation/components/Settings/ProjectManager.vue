@@ -69,25 +69,48 @@ export default defineComponent({
     }
   },
   mounted() {
-    // Cross-window bridge for iframe embeds: a parent page can post
+    // Cross-window bridge for iframe embeds. The parent page can post one of:
     //   { type: 'load-project', zip: <Blob> }
-    // and we treat that Blob exactly like a manually-selected .zip.
+    //   { type: 'load-project', zipBase64: '<base64>' }
+    // Base64 is preferred because Blobs sometimes fail to survive nested
+    // cross-origin iframe hops (e.g. Streamlit → component iframe → us).
     this.messageHandler = async (event: MessageEvent) => {
       const data = event.data
-      if (data && data.type === 'load-project' && data.zip instanceof Blob) {
-        await this.loadProjectFromBlob(data.zip)
+      if (!data || data.type !== 'load-project') return
+
+      let blob: Blob | null = null
+      if (data.zip instanceof Blob) {
+        blob = data.zip
+      } else if (typeof data.zipBase64 === 'string') {
+        try {
+          const bin = atob(data.zipBase64)
+          const bytes = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+          blob = new Blob([bytes], { type: 'application/zip' })
+        } catch (e) {
+          console.error('base64 decode failed', e)
+        }
       }
+      if (blob) await this.loadProjectFromBlob(blob)
     }
     window.addEventListener('message', this.messageHandler)
     // Announce readiness so the parent knows when it's safe to send the ZIP.
-    try {
-      window.parent?.postMessage(
-        { type: 'starrydigitizer-ready' },
-        '*',
-      )
-    } catch (_) {
-      // No parent window — direct visit, nothing to do.
+    // Retry a few times to defeat a race where the parent's listener isn't
+    // attached yet when the iframe first mounts.
+    const announce = () => {
+      try {
+        window.parent?.postMessage(
+          { type: 'starrydigitizer-ready' },
+          '*',
+        )
+      } catch (_) {
+        // No parent window — direct visit, nothing to do.
+      }
     }
+    announce()
+    setTimeout(announce, 300)
+    setTimeout(announce, 1000)
+    setTimeout(announce, 3000)
   },
   beforeUnmount() {
     if (this.messageHandler) {
