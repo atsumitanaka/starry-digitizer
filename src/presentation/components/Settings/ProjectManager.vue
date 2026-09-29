@@ -65,6 +65,34 @@ export default defineComponent({
       saving: false,
       loading: false,
       errorMessage: '',
+      messageHandler: null as ((event: MessageEvent) => void) | null,
+    }
+  },
+  mounted() {
+    // Cross-window bridge for iframe embeds: a parent page can post
+    //   { type: 'load-project', zip: <Blob> }
+    // and we treat that Blob exactly like a manually-selected .zip.
+    this.messageHandler = async (event: MessageEvent) => {
+      const data = event.data
+      if (data && data.type === 'load-project' && data.zip instanceof Blob) {
+        await this.loadProjectFromBlob(data.zip)
+      }
+    }
+    window.addEventListener('message', this.messageHandler)
+    // Announce readiness so the parent knows when it's safe to send the ZIP.
+    try {
+      window.parent?.postMessage(
+        { type: 'starrydigitizer-ready' },
+        '*',
+      )
+    } catch (_) {
+      // No parent window — direct visit, nothing to do.
+    }
+  },
+  beforeUnmount() {
+    if (this.messageHandler) {
+      window.removeEventListener('message', this.messageHandler)
+      this.messageHandler = null
     }
   },
   methods: {
@@ -92,19 +120,25 @@ export default defineComponent({
     },
 
     async onFileSelected(event: Event) {
+      const target = event.target as HTMLInputElement
+      const file = target.files?.[0]
+      if (!file) {
+        this.errorMessage = 'No file selected'
+        return
+      }
+      await this.loadProjectFromBlob(file)
+      // Reset file input so re-selecting the same file re-fires @change.
+      target.value = ''
+    },
+
+    async loadProjectFromBlob(blob: Blob) {
       this.loading = true
       this.errorMessage = ''
 
       try {
-        const target = event.target as HTMLInputElement
-        const file = target.files?.[0]
-
-        if (!file) {
-          throw new Error('No file selected')
-        }
-
-        // Load project and get image data
-        const imageData = await this.projectService.loadProject(file)
+        // projectService.loadProject accepts anything with .arrayBuffer(),
+        // so a Blob works even though its signature says File.
+        const imageData = await this.projectService.loadProject(blob as File)
 
         // Initialize canvas with loaded image
         await this.canvasHandler.initializeImageElement(imageData)
@@ -128,11 +162,25 @@ export default defineComponent({
           axisSet.pointMode = POINT_MODE.FOUR_POINTS
         })
 
-        // Reset file input
-        target.value = ''
+        try {
+          window.parent?.postMessage(
+            { type: 'starrydigitizer-loaded' },
+            '*',
+          )
+        } catch (_) {
+          // Ignore — no parent.
+        }
       } catch (error) {
         console.error('Error loading project:', error)
         this.errorMessage = `Error loading project: ${(error as Error).message}`
+        try {
+          window.parent?.postMessage(
+            { type: 'starrydigitizer-error', message: this.errorMessage },
+            '*',
+          )
+        } catch (_) {
+          // Ignore.
+        }
       } finally {
         this.loading = false
       }
